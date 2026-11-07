@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Jade Rain Matrix
+GenericName=Rain wallpaper editor
+Comment=Edit Jade Rain Matrix colors, phrases, and logo
+Exec=jade-rain-matrix edit
+Icon=video-display
+Terminal=false
+Categories=Settings;DesktopSettings;
+Keywords=wallpaper;rain;omarchy;matrix;
+StartupNotify=false
+# jade-rain-desktop v1

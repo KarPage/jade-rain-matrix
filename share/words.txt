@@ -1,0 +1,12 @@
+# One phrase per line. Blank lines and lines starting with # are ignored.
+# Two words, such as Kar Page, are a name: mixed case, split by a katakana
+# cell now and then, about 45% brighter than the tail, and they do not flicker.
+# Any other line is woven in as a normal phrase. An empty file is pure rain.
+
+Kar Page
+apps.karpage.com
+OmaRaptor
+Oma Year
+OmaAgentWatch
+OmaKardash
+Omarchy
