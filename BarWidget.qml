@@ -14,16 +14,20 @@ Item {
     property var settings: null
     property string fixedEdge: "start"
 
-    implicitWidth: 18
+    implicitWidth: 22
     implicitHeight: bar && bar.barSize ? bar.barSize : 26
 
     Item {
         anchors.centerIn: parent
-        width: 8
+        width: 13
         height: 14
-        Rectangle { x: 0; y: 5; width: 1; height: 9; color: "#3fe0a4" }
-        Rectangle { x: 3; y: 0; width: 1; height: 14; color: "#3fe0a4" }
-        Rectangle { x: 6; y: 4; width: 1; height: 10; color: "#3fe0a4" }
+        // Option A: three staggered dim columns, each with a bright 3x3 tip.
+        Rectangle { x: 0; y: 0; width: 3; height: 6; color: Qt.darker("#3fe0a4", 1.4) }
+        Rectangle { x: 0; y: 6; width: 3; height: 3; color: Qt.lighter("#3fe0a4", 1.35) }
+        Rectangle { x: 5; y: 4; width: 3; height: 7; color: Qt.darker("#3fe0a4", 1.4) }
+        Rectangle { x: 5; y: 11; width: 3; height: 3; color: Qt.lighter("#3fe0a4", 1.35) }
+        Rectangle { x: 10; y: 2; width: 3; height: 6; color: Qt.darker("#3fe0a4", 1.4) }
+        Rectangle { x: 10; y: 8; width: 3; height: 3; color: Qt.lighter("#3fe0a4", 1.35) }
     }
 
     MouseArea {

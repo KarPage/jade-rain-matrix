@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 - 2026-11-07
+
+- Live-preview-first settings: four modes, words, logo drag/drop, color and motion controls, and a collapsed Advanced section.
+- Explicit Save with per-mode drafts, validated atomic mode saves, immediate reset feedback, and safe content-addressed logo uploads.
+- One-tap rain-columns bar icon (13×14 in a 22 px slot); focus an existing settings window instead of opening another.
+- Chromeless Chromium app window with a separate local profile; float and center on Lua Hyprland at 85% of the monitor, capped at 1400×1000 logical pixels.
+- Preserve Matrix naming, legacy config compatibility, loopback/token/Host/Origin protections; add CSP and no-referrer headers.
+- Clearing mode words or custom colors now clears inherited values rather than restoring them on reload.
+- Actual-screen silent loop plus one original empty-workspace still, with Kar Page words and the logo unchanged. Compact animated WebP replaces the old generated screenshot set.
+- Package, manifest and documentation now consistently use 0.2.0. The earlier commit title “1.0” was a label, not the package version; the previous package was 0.1.0. No public history or tags are rewritten.
+
 ## 0.1.0 - 2026-11-07
 
 - First release of Jade Rain Matrix.

@@ -8,6 +8,7 @@ import urllib.request
 from pathlib import Path
 
 from jade_rain.editor import EditorServer, local_request
+from jade_rain.config import config_dir
 
 
 class EditorTests(unittest.TestCase):
@@ -32,7 +33,7 @@ class EditorTests(unittest.TestCase):
                 self.assertIn("border-radius:0", page)
                 self.assertNotIn("border-radius:6", page)
                 self.assertNotIn("border-radius:8", page)
-                for heading in ("Text", "Colors", "Logo", "Motion", "Imported text"):
+                for heading in ("Your words", "Colors", "Your logo", "Motion", "Imported text"):
                     self.assertIn(heading, page)
                 wide = self._post(
                     port,
@@ -56,7 +57,7 @@ class EditorTests(unittest.TestCase):
                 )
                 self.assertTrue(saved["ok"])
                 self.assertEqual(saved["mode"], "screensaver")
-                text = (home / ".config" / "jade-rain-matrix" / "config.toml").read_text(encoding="utf-8")
+                text = (config_dir() / "config.toml").read_text(encoding="utf-8")
                 self.assertIn("[profiles.jade.modes.screensaver]", text)
                 self.assertIn("own rain", text)
             finally:

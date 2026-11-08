@@ -336,8 +336,8 @@ def _merge_values(base: dict[str, object], override: dict[str, object]) -> dict[
     for key, value in override.items():
         if value is None:
             continue
-        if isinstance(value, str) and value == "" and key in {"primary", "highlight", "background", "phrases", "glyphs"}:
-            continue
+        # A missing key inherits; an explicit empty string clears a mode field.
+        # Otherwise selecting theme colors or removing inherited words cannot work.
         merged[key] = value
     return merged
 

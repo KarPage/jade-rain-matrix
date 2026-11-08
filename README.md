@@ -1,4 +1,4 @@
-Inspired by and based on [bjarneo's Omarchy Matrix theme](https://github.com/bjarneo/omarchy-matrix-theme). Credit: bjarneo (@iamdothash).
+Inspired by and based on [bjarneo's Omarchy Matrix theme](https://github.com/bjarneo/omarchy-matrix-theme). Credit: bjarneo ([@iamdothash](https://x.com/iamdothash)).
 
 That repository has no license. Jade Rain Matrix is original work: none of its files, video, images, or code are included here.
 
@@ -6,17 +6,20 @@ That repository has no license. Jade Rain Matrix is original work: none of its f
 
 Calm digital rain for an Omarchy desktop. Jade Rain Matrix renders a seamless loop on your machine, in the colors of the active theme, and can set it with `omarchy-theme-bg-set`. Nothing is uploaded.
 
-## Screenshots
+## Live on an Omarchy desktop
 
-Generated frames, not a photo of a desktop. Live and still use the jade field. Light uses dark ink on a paper field. Screensaver uses the matrix green and is not set as the wallpaper.
+A silent five-second capture of the actual live rain, with Kar Page words and the
+Kar Page logo exactly as configured. No windows, notifications or desktop bar.
+Recorded live without changing its settings or re-rendering. The bar is cropped;
+resizing/compression and a short seam crossfade are the only video edits.
 
-![Live](screenshots/mode-live.png)
+![Live Jade Rain Matrix animation](docs/screenshots/jade-rain-loop-readme.webp)
 
-![Still](screenshots/mode-still.png)
+![Jade Rain Matrix on an empty desktop](docs/screenshots/jade-rain-real-1.webp)
 
-![Light](screenshots/mode-light.png)
-
-![Screensaver](screenshots/mode-screensaver.png)
+The animation is 960 px wide (~3.9 MB); the still is 1920 px wide. The
+[website](https://apps.karpage.com/jade-rain-matrix) has the higher-resolution silent
+video and shows a static poster when reduced motion is requested.
 
 ## Install
 
@@ -73,7 +76,27 @@ Live output is `~/.config/omarchy/backgrounds/<theme>/jade-rain.mp4` and `jade-r
 jade-rain-matrix edit
 ```
 
-The editor is a page on `127.0.0.1`, opened from that command, from the Jade Rain Matrix item in the application menu, or from the bar glyph after you add it. The page uses the Python standard library and the NumPy and Pillow the renderer already needs. It does not fetch fonts, scripts, or the credit links. A token in the address is required. The server accepts only a `127.0.0.1` or `localhost` Host for its own port, and only a matching Origin when one is sent. Ctrl+S saves. Esc closes About, then the window. Keys 1–4 switch mode when you are not typing in a text field. The preview fills the right side and redraws as the fields change.
+One tap on the rain-columns bar icon opens settings, or brings the existing
+settings window to the front. With Chromium installed, it opens as a clean app
+window with no tabs or address bar and its own local browser profile at
+`~/.local/state/jade-rain/settings-browser`. On Lua-configured Hyprland it floats
+centered over your tiles at 85% of the monitor, capped at 1400×1000 logical pixels.
+No window rules or key bindings are written. Without Chromium, it opens in your
+default browser instead.
+
+The live preview leads the page: pause or expand it, switch Live / Still / Light /
+Screensaver, rain your own words and drop your own logo. Colors and motion have
+simple controls; profiles, character sets and exact values stay in Advanced.
+Edits are drafts until **Save changes** (or Ctrl+S); mode drafts survive switching
+and save together. Reset asks first and only resets the selected mode. Esc closes
+an expanded preview or About before offering to close settings. Keys 1–4 switch
+mode outside a text field. Previewing never changes your wallpaper or players.
+
+The page runs only on an ephemeral `127.0.0.1` port, using the Python standard
+library and the NumPy/Pillow already needed by the renderer. It makes no remote
+requests. Token, Host and matching-Origin checks protect every endpoint; CSP and
+no-referrer headers keep it isolated. Upload/import stores a local asset but does
+not apply it until Save. Closing the server with Ctrl+C stops the local editor.
 
 ### Modes
 
@@ -169,7 +192,7 @@ This removes the `jade-rain-matrix` and `jade-rain` links when they point at thi
 
 ## License
 
-MIT. Copyright 2026 KarPage. Version 0.1.0.
+MIT. Copyright 2026 KarPage. Version 0.2.0.
 
 [bjarneo/omarchy-matrix-theme](https://github.com/bjarneo/omarchy-matrix-theme) publishes no license (there is no `LICENSE` file, and the GitHub license field is empty). Jade Rain Matrix does not include that repository’s files, video, images, or code. The credit above is the notice.
 

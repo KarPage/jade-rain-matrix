@@ -9,7 +9,9 @@ A token in the address stops other local programs from saving over the config.
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 import hmac
+import hashlib
 import io
 import json
 import os
@@ -31,6 +33,11 @@ from jade_rain.config import (
     Profile,
     Settings,
     _settings_from_document,
+    _profile_name,
+    _display_mode,
+    save_document,
+    factory_values,
+    factory_modes,
     apply_mode_form,
     config_dir,
     form_values,
@@ -41,6 +48,7 @@ from jade_rain.config import (
 )
 from jade_rain.credit import CREDIT_TEXT, SOURCE_PROFILE, SOURCE_URL
 from jade_rain.paths import colors_file
+from jade_rain.preview import canvas_scene
 from jade_rain.textsrc import extract_text, load_source_phrases, write_source
 
 _MAX_BODY = 2_500_000
@@ -68,7 +76,84 @@ class EditorServer:
         return f"http://{host}:{port}/?token={self.token}"
 
 
+def is_settings_window(client: dict) -> bool:
+    """Our window: the X11 class, or on Wayland Chromium's URL app-id plus our own profile."""
+    cls = client.get("class", "")
+    if cls == APP_CLASS:
+        return True
+    if not cls.startswith("chrome-127.0.0.1"):
+        return False
+    try:
+        cmdline = Path(f"/proc/{int(client.get('pid', 0))}/cmdline").read_bytes()
+    except (OSError, ValueError):
+        return False
+    return b"jade-rain/settings-browser" in cmdline
+
+
+def _dispatch(expression: str) -> None:
+    subprocess.run(["hyprctl", "dispatch", expression], capture_output=True, timeout=3)
+
+
+def float_size(monitor_id, monitors=None) -> tuple[int, int]:
+    """85% of the window's monitor in logical pixels, capped at 1400x1000."""
+    if monitors is None:
+        try:
+            out = subprocess.run(["hyprctl", "monitors", "-j"], capture_output=True, text=True, timeout=3).stdout
+            monitors = json.loads(out or "[]")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            monitors = []
+    for mon in monitors:
+        if mon.get("id") == monitor_id or (monitor_id is None and mon.get("focused")):
+            scale = float(mon.get("scale") or 1)
+            width, height = mon["width"] / scale, mon["height"] / scale
+            if mon.get("transform", 0) % 2:
+                width, height = height, width
+            return min(1400, int(width * 0.85)), min(1000, int(height * 0.85))
+    return 950, 600
+
+
+def float_window_when_ready(timeout: float = 15.0) -> bool:
+    """Float, size to 85% of the monitor and center our app window once it maps. No config edits."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=3).stdout
+            clients = json.loads(out or "[]")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
+        for client in clients:
+            if is_settings_window(client) and client.get("address"):
+                win = f'"address:{client["address"]}"'
+                _dispatch(f'hl.dsp.window.float({{ action = "on", window = {win} }})')
+                w, h = float_size(client.get("monitor"))
+                _dispatch(f'hl.dsp.window.resize({{ x = {w}, y = {h}, window = {win} }})')
+                _dispatch(f'hl.dsp.window.center({{ window = {win} }})')
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def focus_existing_window() -> bool:
+    """Focus an open settings app window instead of opening a second one."""
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=3).stdout
+        clients = json.loads(out or "[]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    for client in clients:
+        if is_settings_window(client) and client.get("address"):
+            address = client['address']
+            _dispatch(f'hl.dsp.focus({{ window = "address:{address}" }})')
+            return True
+    return False
+
+
 def serve(open_browser: bool = True) -> int:
+    if open_browser and os_display() and focus_existing_window():
+        print("settings window already open; focused it.", file=sys.stderr)
+        return 0
     server = EditorServer()
     server.start()
     address = server.url()
@@ -76,11 +161,12 @@ def serve(open_browser: bool = True) -> int:
     print("local only. Ctrl+C closes the editor.", file=sys.stderr)
     if open_browser and (os_display()):
         subprocess.Popen(
-            ["xdg-open", address],
+            app_window_command(address),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        threading.Thread(target=float_window_when_ready, daemon=True).start()
     try:
         server.thread.join()
     except KeyboardInterrupt:
@@ -88,6 +174,32 @@ def serve(open_browser: bool = True) -> int:
     finally:
         server.close()
     return 0
+
+
+APP_CLASS = "io.github.karpage.jade-rain-settings"
+
+
+def app_window_command(address: str) -> list[str]:
+    """A chrome-less Chromium app window with its own class and profile.
+
+    A separate profile keeps it out of the main browser so the class sticks.
+    Falls back to xdg-open when Chromium is not installed.
+    """
+    import shutil
+
+    browser = shutil.which("chromium")
+    if not browser:
+        return ["xdg-open", address]
+    profile = Path.home() / ".local" / "state" / "jade-rain" / "settings-browser"
+    profile.mkdir(parents=True, exist_ok=True)
+    return [
+        browser,
+        f"--app={address}",
+        f"--class={APP_CLASS}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
 
 
 def os_display() -> bool:
@@ -131,6 +243,7 @@ def _host_and_port(value: str | None) -> tuple[str, int] | None:
 
 
 def _handler(token: str) -> type[BaseHTTPRequestHandler]:
+    mutation_lock = threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -160,7 +273,11 @@ def _handler(token: str) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:
             if not self._local():
                 return
-            length = int(self.headers.get("Content-Length", "0") or "0")
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                self._json({"ok": False, "error": "invalid request length"}, status=400)
+                return
             if length < 0 or length > _MAX_BODY:
                 self._send(413, b"too large", "text/plain; charset=utf-8")
                 return
@@ -175,31 +292,39 @@ def _handler(token: str) -> type[BaseHTTPRequestHandler]:
                 return
             path = urlparse(self.path).path
             try:
+                if path == "/api/scene":
+                    self._json(_canvas_preview(payload))
+                    return
                 if path == "/api/preview":
                     image = _preview(payload)
                     self._send(200, image, "image/png")
                     return
                 if path == "/api/save":
-                    settings = _save(payload)
+                    with mutation_lock:
+                        settings = _save(payload)
                     self._json({"ok": True, "profile": settings.profile, "mode": settings.display_mode})
                     return
                 if path == "/api/reset":
-                    settings = reset_mode(str(payload.get("profile", "jade")), str(payload.get("mode", "live")))
-                    self._json({"ok": True, "profile": settings.profile, "mode": settings.display_mode})
+                    with mutation_lock:
+                        settings = reset_mode(str(payload.get("profile", "jade")), str(payload.get("mode", "live")))
+                    self._json({"ok": True, "profile": settings.profile, "mode": settings.display_mode,
+                                "form": _form_from_settings(settings)})
                     return
                 if path == "/api/import":
-                    count = _import_file(str(payload.get("path", "")))
+                    with mutation_lock:
+                        count = _import_file(str(payload.get("path", "")))
                     self._json({"ok": True, "phrases": count})
                     return
                 if path == "/api/logo":
-                    stored = _store_logo(str(payload.get("name", "logo")), str(payload.get("data", "")))
+                    with mutation_lock:
+                        stored = _store_logo(str(payload.get("name", "logo")), str(payload.get("data", "")))
                     self._json({"ok": True, "logo": stored})
                     return
                 if path == "/api/close":
                     self._json({"ok": True})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
-            except (ValueError, OSError, FileNotFoundError) as error:
+            except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
                 self._json({"ok": False, "error": str(error)}, status=400)
                 return
             self._send(404, b"not found", "text/plain; charset=utf-8")
@@ -214,8 +339,14 @@ def _handler(token: str) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'")
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # An obsolete preview fetch was cancelled by a newer edit.
+                pass
 
     return Handler
 
@@ -248,13 +379,19 @@ def _page(token: str, profile: str = "", mode: str = "") -> str:
             "mode": settings.display_mode,
             "modes": list(DISPLAY_MODES),
             "form": form,
+            "forms": {name: _form_from_settings(_settings_from_document(
+                ConfigDocument(document.active, name, document.profiles, document.path)
+            )) for name in DISPLAY_MODES},
             "credit": CREDIT_TEXT,
             "sourceUrl": SOURCE_URL,
             "sourceProfile": SOURCE_PROFILE,
             "version": __version__,
         }
     ).replace("<", "\\u003c")
-    return _HTML.replace("/*__STATE__*/", payload)
+    html = Path(__file__).with_name("settings.html").read_text(encoding="utf-8")
+    return html.replace("/*__STATE__*/", payload).replace(
+        "/*__PREVIEW__*/", Path(__file__).with_name("preview.js").read_text(encoding="utf-8")
+    ).replace("/*__EDITOR__*/", Path(__file__).with_name("settings.js").read_text(encoding="utf-8"))
 
 
 def _form_from_settings(settings: Settings) -> dict[str, object]:
@@ -288,7 +425,28 @@ def _save(payload: dict[str, object]) -> Settings:
     form = payload.get("form")
     if not isinstance(form, dict):
         raise ValueError("form is missing")
-    return apply_mode_form(profile, mode, form)
+    forms = payload.get("forms")
+    if forms is None:
+        return apply_mode_form(profile, mode, form)
+    if not isinstance(forms, dict) or not forms or len(forms) > len(DISPLAY_MODES):
+        raise ValueError("mode settings are missing")
+    name, display = _profile_name(profile), _display_mode(mode)
+    checked = {}
+    for key, value in forms.items():
+        if not isinstance(value, dict):
+            raise ValueError("mode settings must be a form")
+        checked[_display_mode(str(key))] = form_values(value)
+    document = load_document()
+    if name not in document.profiles:
+        source = str(payload.get("profile") or "")
+        document.profiles[name] = deepcopy(document.profiles[source]) if source in document.profiles else Profile(name, factory_values(), factory_modes())
+        document.profiles[name].name = name
+    for key, value in checked.items():
+        # Preserve non-editor keys too; no unrelated customization is discarded.
+        document.profiles[name].modes.setdefault(key, {}).update(value)
+    document.active, document.mode = name, display
+    save_document(document)
+    return _settings_from_document(document)
 
 
 def _preview_size(payload: dict[str, object]) -> tuple[int, int]:
@@ -306,7 +464,7 @@ def _preview_size(payload: dict[str, object]) -> tuple[int, int]:
     return max(160, int(width * scale)), max(100, int(height * scale))
 
 
-def _preview(payload: dict[str, object]) -> bytes:
+def _preview_scene(payload: dict[str, object], frames: int = 4):
     form = payload.get("form")
     if not isinstance(form, dict):
         raise ValueError("form is missing")
@@ -324,15 +482,25 @@ def _preview(payload: dict[str, object]) -> bytes:
         settings,
         width=width,
         height=height,
-        frames=4,
+        frames=frames,
         words=words,
         source_phrases=source,
         theme_file=colors_file(),
         density=settings.density,
     )
+    return scene
+
+
+def _preview(payload: dict[str, object]) -> bytes:
+    scene = _preview_scene(payload)
     buffer = io.BytesIO()
     Image.fromarray(scene.frame(1), "RGB").save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def _canvas_preview(payload: dict[str, object]) -> dict[str, object]:
+    scene = _preview_scene(payload, frames=640)
+    return canvas_scene(scene, str(payload.get("mode") or "live"))
 
 
 def apply_preview(mode: str, form: dict[str, object]) -> Settings:
@@ -371,375 +539,11 @@ def _store_logo(name: str, data: str) -> str:
     else:
         raise ValueError("logo must be a PNG or SVG")
     safe = "".join(ch for ch in Path(name).name if ch.isalnum() or ch in "._-")[:40] or "logo"
-    destination = config_dir() / "logos" / f"{safe}{suffix}"
+    # An unsaved replacement must never overwrite the file currently in use.
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    destination = config_dir() / "logos" / f"{safe}-{digest}{suffix}"
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     temporary.write_bytes(raw)
     temporary.replace(destination)
     return str(destination)
-
-
-_HTML = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Jade Rain Matrix</title>
-<style>
-  :root {
-    color-scheme: dark;
-    --bg:#0d0204;
-    --field:#12080c;
-    --ink:#e7fff4;
-    --muted:#8fbfa8;
-    --jade:#3fe0a4;
-    --line:#1e4a3a;
-    --font: ui-monospace, "JetBrains Mono", "Noto Sans Mono", monospace;
-  }
-  * { box-sizing: border-box; border-radius:0 !important; }
-  html, body { height:100%; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:13px/1.45 var(--font); }
-  main { display:grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); height:100vh; }
-  form { height:100vh; overflow:auto; padding:18px 18px 28px; border-right:1px solid var(--line); }
-  aside { position:relative; height:100vh; background:#0d0204; overflow:hidden; }
-  h1 { margin:0; font-size:15px; font-weight:500; letter-spacing:.14em; text-transform:uppercase; }
-  p.lead { margin:6px 0 0; color:var(--muted); }
-  h2 { margin:18px 0 8px; padding-top:10px; border-top:1px solid var(--line); color:var(--jade); font-size:11px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; }
-  label { display:block; margin:10px 0 4px; color:var(--muted); }
-  .hint { color:var(--jade); }
-  input, select, textarea, button {
-    width:100%;
-    background:var(--field);
-    color:var(--ink);
-    border:1px solid var(--line);
-    border-radius:0;
-    padding:7px 8px;
-    font:inherit;
-    accent-color:var(--jade);
-    outline:none;
-  }
-  textarea { min-height:88px; resize:vertical; }
-  input:focus, select:focus, textarea:focus, button:focus { border-color:var(--jade); }
-  select {
-    appearance:none;
-    background-image:linear-gradient(45deg, transparent 50%, var(--jade) 50%), linear-gradient(135deg, var(--jade) 50%, transparent 50%);
-    background-position:calc(100% - 14px) 55%, calc(100% - 8px) 55%;
-    background-size:6px 6px, 6px 6px;
-    background-repeat:no-repeat;
-    padding-right:22px;
-  }
-  input[type="range"] {
-    appearance:none;
-    -webkit-appearance:none;
-    height:16px;
-    padding:0;
-    background:transparent;
-    border:0;
-  }
-  input[type="range"]::-webkit-slider-runnable-track { height:1px; background:var(--jade); border-radius:0; }
-  input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance:none;
-    width:8px; height:14px; margin-top:-6px;
-    background:var(--jade); border:0; border-radius:0;
-  }
-  input[type="range"]::-moz-range-track { height:1px; background:var(--jade); border:0; border-radius:0; }
-  input[type="range"]::-moz-range-thumb { width:8px; height:14px; background:var(--jade); border:0; border-radius:0; }
-  input[type="color"] { padding:0; height:28px; }
-  input[type="color"]::-webkit-color-swatch-wrapper { padding:0; border-radius:0; }
-  input[type="color"]::-webkit-color-swatch { border:0; border-radius:0; }
-  input[type="file"] { padding:6px; }
-  input[type="file"]::file-selector-button,
-  input[type="file"]::-webkit-file-upload-button {
-    border-radius:0;
-    border:1px solid var(--line);
-    background:transparent;
-    color:var(--ink);
-    font:inherit;
-    padding:4px 8px;
-  }
-  .row { display:grid; grid-template-columns:1fr 72px; gap:8px; align-items:center; }
-  .actions { display:flex; gap:8px; margin-top:16px; }
-  button { width:auto; background:transparent; color:var(--ink); cursor:pointer; }
-  button.primary { background:var(--jade); color:#062016; border-color:var(--jade); }
-  img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#0d0204; border-radius:0; }
-  .status { min-height:1.4em; margin:8px 0 0; color:var(--jade); }
-  .about {
-    position:fixed; z-index:2; left:18px; top:18px; width:min(440px, calc(100vw - 36px));
-    background:#0d0204; border:1px solid var(--jade); padding:14px 16px; color:var(--muted);
-  }
-  .about p { margin:0 0 10px; }
-  a { color:var(--jade); }
-  @media (max-width: 800px) {
-    main { grid-template-columns:1fr; height:auto; }
-    form { height:auto; border-right:0; }
-    aside { height:56vw; min-height:220px; }
-  }
-</style>
-</head>
-<body>
-<main>
-  <form id="editor">
-    <h1>Jade Rain Matrix</h1>
-    <p class="lead">Saved on this computer.</p>
-    <label for="profile">Profile</label>
-    <select id="profile" name="profile"></select>
-    <label for="new-profile">Save as a new profile</label>
-    <input id="new-profile" maxlength="32" placeholder="blank keeps the profile above" autocomplete="off">
-    <label for="mode">Mode <span class="hint">1 live · 2 still · 3 light · 4 saver</span></label>
-    <select id="mode" name="mode"></select>
-    <h2>Text</h2>
-    <label for="phrases">Words and phrases, one per line</label>
-    <textarea id="phrases" autofocus></textarea>
-    <label for="mix">Phrase mix <span id="mix-out"></span></label>
-    <input id="mix" type="range" min="0" max="1" step="0.01">
-    <label for="glyph">Glyphs</label>
-    <select id="glyph">
-      <option value="katakana">katakana</option>
-      <option value="latin">latin</option>
-      <option value="digits">digits</option>
-      <option value="custom">custom</option>
-    </select>
-    <label for="glyphs">Custom glyphs</label>
-    <input id="glyphs" maxlength="64" placeholder="used when glyphs is custom">
-    <h2>Colors</h2>
-    <label for="preset">Preset</label>
-    <select id="preset">
-      <option value="theme">theme</option>
-      <option value="jade">jade</option>
-      <option value="matrix">matrix</option>
-      <option value="ink">ink</option>
-      <option value="paper">paper</option>
-    </select>
-    <label for="primary">Primary</label>
-    <div class="row"><input id="primary" maxlength="7" placeholder="#3fe0a4" spellcheck="false"><input id="primary-pick" type="color" aria-label="primary picker" tabindex="0"></div>
-    <label for="highlight">Highlight</label>
-    <div class="row"><input id="highlight" maxlength="7" placeholder="#e9fff6" spellcheck="false"><input id="highlight-pick" type="color" aria-label="highlight picker"></div>
-    <label for="background">Background</label>
-    <div class="row"><input id="background" maxlength="7" placeholder="#0d0204" spellcheck="false"><input id="background-pick" type="color" aria-label="background picker"></div>
-    <h2>Logo</h2>
-    <label for="logo">Path</label>
-    <input id="logo" placeholder="PNG or SVG on this computer" spellcheck="false">
-    <label for="logo-file">File</label>
-    <input id="logo-file" type="file" accept="image/png,image/svg+xml,.png,.svg">
-    <label for="logo-style">Style</label>
-    <select id="logo-style"><option value="watermark">watermark</option><option value="sprite">glyph sprite</option></select>
-    <label for="logo-size">Size <span id="size-out"></span></label>
-    <input id="logo-size" type="range" min="40" max="800" step="10">
-    <label for="logo-opacity">Opacity <span id="opacity-out"></span></label>
-    <input id="logo-opacity" type="range" min="0" max="1" step="0.01">
-    <h2>Motion</h2>
-    <label for="density">Density <span id="density-out"></span></label>
-    <input id="density" type="range" min="0.2" max="1.5" step="0.05">
-    <label for="speed">Speed <span id="speed-out"></span></label>
-    <input id="speed" type="range" min="1" max="4" step="1">
-    <h2>Imported text</h2>
-    <label for="text-mode">Source file</label>
-    <select id="text-mode"><option value="off">off</option><option value="mix">mix</option><option value="replace">replace</option></select>
-    <label for="import-path">File on this computer</label>
-    <div class="row"><input id="import-path" placeholder="/path/to/book.txt" spellcheck="false"><button id="import" type="button">Import</button></div>
-    <div class="actions">
-      <button class="primary" type="submit">Save</button>
-      <button id="reset" type="button">Reset mode</button>
-      <button id="about" type="button">About</button>
-    </div>
-    <p class="status" id="status" role="status"></p>
-    <section class="about" id="about-panel" hidden>
-      <p id="credit"></p>
-      <p><a id="source-url" href=""></a><br><a id="source-profile" href=""></a></p>
-      <p>Jade Rain Matrix <span id="version"></span>. The editor never leaves this machine. Esc closes this panel, then the window.</p>
-    </section>
-  </form>
-  <aside>
-    <img id="frame" alt="Live preview of the rain">
-  </aside>
-</main>
-<script>
-const STATE = /*__STATE__*/;
-const $ = (id) => document.getElementById(id);
-function fillSelect(el, values, current) {
-  el.replaceChildren();
-  values.forEach((value) => {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = value;
-    if (value === current) option.selected = true;
-    el.appendChild(option);
-  });
-}
-function readForm() {
-  return {
-    color_preset: $("preset").value,
-    primary: $("primary").value.trim(),
-    highlight: $("highlight").value.trim(),
-    background: $("background").value.trim(),
-    logo: $("logo").value.trim(),
-    logo_size: Number($("logo-size").value),
-    logo_opacity: Number($("logo-opacity").value),
-    logo_style: $("logo-style").value,
-    word_scale: Number(STATE.form.word_scale),
-    text_mode: $("text-mode").value,
-    text_density: Number(STATE.form.text_density),
-    mix: Number($("mix").value),
-    density: Number($("density").value),
-    speed: Number($("speed").value),
-    glyph_set: $("glyph").value,
-    glyphs: $("glyphs").value,
-    phrases: $("phrases").value
-  };
-}
-function writeForm(form) {
-  $("phrases").value = form.phrases || "";
-  $("mix").value = form.mix;
-  $("glyph").value = form.glyph_set;
-  $("glyphs").value = form.glyphs || "";
-  $("preset").value = form.color_preset;
-  $("primary").value = form.primary || "";
-  $("highlight").value = form.highlight || "";
-  $("background").value = form.background || "";
-  $("logo").value = form.logo || "";
-  $("logo-style").value = form.logo_style;
-  $("logo-size").value = form.logo_size;
-  $("logo-opacity").value = form.logo_opacity;
-  $("density").value = form.density;
-  $("speed").value = form.speed;
-  $("text-mode").value = form.text_mode;
-  syncPickers();
-  syncLabels();
-}
-function syncLabels() {
-  $("mix-out").textContent = Number($("mix").value).toFixed(2);
-  $("size-out").textContent = $("logo-size").value;
-  $("opacity-out").textContent = Number($("logo-opacity").value).toFixed(2);
-  $("density-out").textContent = Number($("density").value).toFixed(2);
-  $("speed-out").textContent = $("speed").value;
-}
-function syncPickers() {
-  ["primary", "highlight", "background"].forEach((name) => {
-    const hex = $(name).value.trim();
-    if (/^#[0-9a-fA-F]{6}$/.test(hex)) $(name + "-pick").value = hex;
-  });
-}
-async function post(path, extra, image) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(Object.assign({token: STATE.token, profile: $("profile").value, new_profile: $("new-profile").value.trim(), mode: $("mode").value, form: readForm()}, extra || {}))
-  });
-  if (image) return response;
-  return response.json();
-}
-function say(text) { $("status").textContent = text; }
-fillSelect($("profile"), STATE.profiles, STATE.profile);
-fillSelect($("mode"), STATE.modes, STATE.mode);
-writeForm(STATE.form);
-$("credit").textContent = STATE.credit;
-$("source-url").textContent = STATE.sourceUrl;
-$("source-url").href = STATE.sourceUrl;
-$("source-profile").textContent = "@iamdothash";
-$("source-profile").href = STATE.sourceProfile;
-$("version").textContent = STATE.version;
-document.querySelectorAll("input[type=range]").forEach((el) => el.addEventListener("input", syncLabels));
-["primary", "highlight", "background"].forEach((name) => {
-  $(name).addEventListener("input", syncPickers);
-  $(name + "-pick").addEventListener("input", () => { $(name).value = $(name + "-pick").value; });
-});
-$("editor").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const body = await post("/api/save");
-  say(body.ok ? "Saved " + body.profile + " / " + body.mode : body.error);
-});
-function typingTarget(target) {
-  if (!target || !target.tagName) return false;
-  if (target.tagName === "TEXTAREA") return true;
-  return target.tagName === "INPUT" && (target.type === "text" || target.type === "" || target.type === "search");
-}
-document.addEventListener("keydown", async (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-    event.preventDefault();
-    $("editor").requestSubmit();
-    return;
-  }
-  if (event.key === "Escape") {
-    event.preventDefault();
-    if (!$("about-panel").hidden) { $("about-panel").hidden = true; return; }
-    try { await post("/api/close"); } catch (error) {}
-    window.close();
-    return;
-  }
-  if (event.ctrlKey || event.metaKey || event.altKey || typingTarget(event.target)) return;
-  const modes = { "1": "live", "2": "still", "3": "light", "4": "screensaver" };
-  const next = modes[event.key];
-  if (!next || next === $("mode").value) return;
-  event.preventDefault();
-  $("mode").value = next;
-  reloadMode();
-});
-let previewTimer = 0;
-let previewGen = 0;
-function colorsReady() {
-  return ["primary", "highlight", "background"].every((name) => {
-    const value = $(name).value.trim();
-    return value === "" || /^#[0-9a-fA-F]{6}$/.test(value);
-  });
-}
-function schedulePreview() {
-  if (!colorsReady()) return;
-  window.clearTimeout(previewTimer);
-  previewTimer = window.setTimeout(drawPreview, 280);
-}
-async function drawPreview() {
-  const gen = ++previewGen;
-  const pane = document.querySelector("aside");
-  const ratio = window.devicePixelRatio || 1;
-  const width = Math.max(160, Math.round(pane.clientWidth * ratio));
-  const height = Math.max(100, Math.round(pane.clientHeight * ratio));
-  const response = await post("/api/preview", {width: width, height: height}, true);
-  if (gen !== previewGen) return;
-  if (!response.ok) {
-    say("Preview failed");
-    return;
-  }
-  const blob = await response.blob();
-  const previous = $("frame").src;
-  $("frame").src = URL.createObjectURL(blob);
-  if (previous.startsWith("blob:")) URL.revokeObjectURL(previous);
-}
-$("editor").addEventListener("input", schedulePreview);
-$("editor").addEventListener("change", schedulePreview);
-$("reset").addEventListener("click", async () => {
-  const body = await post("/api/reset");
-  say(body.ok ? "Reset " + body.mode + ". Reload to see it." : body.error);
-});
-$("about").addEventListener("click", () => { $("about-panel").hidden = !$("about-panel").hidden; });
-$("import").addEventListener("click", async () => {
-  const body = await post("/api/import", {path: $("import-path").value});
-  if (body.ok) { $("text-mode").value = "mix"; schedulePreview(); say("Imported " + body.phrases + " phrases. They stay in source.txt."); }
-  else say(body.error);
-});
-$("logo-file").addEventListener("change", async () => {
-  const file = $("logo-file").files[0];
-  if (!file) return;
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = "";
-  bytes.forEach((b) => { binary += String.fromCharCode(b); });
-  const body = await post("/api/logo", {name: file.name, data: btoa(binary)});
-  if (body.ok) { $("logo").value = body.logo; schedulePreview(); say("Logo stored locally."); }
-  else say(body.error);
-});
-function reloadMode() {
-  const url = new URL(location.href);
-  url.searchParams.set("token", STATE.token);
-  url.searchParams.set("profile", $("profile").value);
-  url.searchParams.set("mode", $("mode").value);
-  location.href = url.toString();
-}
-$("profile").addEventListener("change", reloadMode);
-$("mode").addEventListener("change", reloadMode);
-window.addEventListener("resize", schedulePreview);
-if (location.hash === "#about") $("about-panel").hidden = false;
-$("phrases").focus();
-drawPreview();
-</script>
-</body>
-</html>
-"""
